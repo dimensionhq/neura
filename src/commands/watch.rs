@@ -12,6 +12,7 @@ use crate::config::Config;
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct Error {
+    pub sha: String,
     pub file: String,
     pub message: String,
 }
@@ -66,11 +67,14 @@ pub fn spawn_check() -> Vec<Error> {
                     continue;
                 }
 
+                let file_name = json["message"]["spans"][0]["file_name"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+
                 errors.push(Error {
-                    file: json["message"]["spans"][0]["file_name"]
-                        .as_str()
-                        .unwrap()
-                        .to_string(),
+                    sha: sha256::digest(format!("{}:{}", file_name, rendered_error)),
+                    file: file_name,
                     message: rendered_error.to_string(),
                 });
             }
@@ -138,10 +142,10 @@ pub async fn execute() -> Result<()> {
 
         let returned_message = completion.choices.first().unwrap().message.clone();
 
-        println!(
-            "🤖 The AI has responded with the following message: {}",
-            returned_message.content
-        );
+        // println!(
+        //     "🤖 The AI has responded with the following message: {}",
+        //     returned_message.content
+        // );
 
         let response_tokens = bpe.encode_with_special_tokens(&returned_message.content);
 
@@ -163,17 +167,31 @@ pub async fn execute() -> Result<()> {
             // Split the contents into lines
             let mut lines = contents.lines().collect::<Vec<&str>>();
 
-            // Replace the line
-            println!("📝 Editing line {}", line_number);
-            lines[line_number - 1] = change.new_line.as_str();
+            // Check if the line number is valid
+            if line_number <= lines.len() + 1 {
+                // Replace the line if it exists or add a new line
+                println!(
+                    "{} Editing {}, line {}",
+                    ">".bright_black(),
+                    change.file.bright_yellow(),
+                    line_number
+                );
+                if line_number <= lines.len() {
+                    lines[line_number - 1] = change.new_line.as_str();
+                } else {
+                    lines.push(change.new_line.as_str());
+                }
 
-            // Join the lines back together
-            contents = lines.join("\n");
+                // Join the lines back together
+                contents = lines.join("\n");
 
-            // Write the new contents to the file
-            std::fs::write(&change.file, &contents).unwrap();
+                // Write the new contents to the file
+                std::fs::write(&change.file, &contents).unwrap();
 
-            estimated_time += change.time_estimate_seconds;
+                estimated_time += change.time_estimate_seconds;
+            } else {
+                println!("Error: Invalid line number {}", line_number);
+            }
         }
 
         // Verify that the fixes applied have resolved the error
@@ -191,37 +209,39 @@ pub async fn execute() -> Result<()> {
             }
         }
 
-        // let estimated_time = change.time_estimate_seconds;
+        // Assume a 50$/hr rate
+        let rate_per_second: f64 = 50.0 / 3600.0;
+        let cost_savings = estimated_time as f64 * rate_per_second;
 
-        // // Assume a 50$/hr rate
-        // let rate_per_second: f64 = 50.0 / 3600.0;
-        // let cost_savings = estimated_time as f64 * rate_per_second;
+        let mut prompt_cost: f64 = 0.0;
+        let mut response_cost: f64 = 0.0;
 
-        // let mut prompt_cost: f64 = 0.0;
-        // let mut response_cost: f64 = 0.0;
+        // Calcuate how much it cost to run the AI
+        match model {
+            crate::models::model::Model::GPT4 => {
+                prompt_cost = (prompt_token_count as f64 / 1000.0) * 0.06;
+                response_cost = (response_token_count as f64 / 1000.0) * 0.12;
+            }
+            crate::models::model::Model::GPT3Turbo => {
+                prompt_cost = (prompt_token_count as f64 / 1000.0) * 0.002;
+                response_cost = (response_token_count as f64 / 1000.0) * 0.002;
+            }
+            crate::models::model::Model::ClaudeV1 => {}
+        }
 
-        // // Calcuate how much it cost to run the AI
-        // match model {
-        //     crate::models::model::Model::GPT4 => {
-        //         prompt_cost = (prompt_token_count as f64 / 1000.0) * 0.06;
-        //         response_cost = (response_token_count as f64 / 1000.0) * 0.12;
-        //     }
-        //     crate::models::model::Model::GPT3Turbo => {
-        //         prompt_cost = (prompt_token_count as f64 / 1000.0) * 0.002;
-        //         response_cost = (response_token_count as f64 / 1000.0) * 0.002;
-        //     }
-        //     crate::models::model::Model::ClaudeV1 => {}
-        // }
+        let total_cost = prompt_cost + response_cost;
 
-        // let total_cost = prompt_cost + response_cost;
-
-        // println!(
-        //     "✅ Successfully resolved {} {}, saving you {}. {} remain.",
-        //     fixed_errors.to_string().bright_green(),
-        //     if fixed_errors == 1 { "error" } else { "errors" },
-        //     format!("{:.2}$", (cost_savings - total_cost)).bright_cyan(),
-        //     errors.len().to_string().bright_red()
-        // );
+        println!(
+            "✅ Successfully resolved {} {}, saving you {}. {} remain.",
+            fixed_errors.to_string().bright_green(),
+            if fixed_errors == 1 { "error" } else { "errors" },
+            format!("{:.2}$", (cost_savings - total_cost)).bright_cyan(),
+            if errors.len() >= 1 {
+                errors.len().to_string().bright_red()
+            } else {
+                "0".bright_green()
+            }
+        );
     }
 
     Ok(())
